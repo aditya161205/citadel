@@ -1,4 +1,4 @@
-#19/5
+# 19/5
 "The technical analyst believes that anything that can possibly affect the price — fundamentally, politically, psychologically — is reflected in the price."
 — John Murphy
 
