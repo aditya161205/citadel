@@ -7,3 +7,5 @@ Pull the Nifty 100 constituent list from NSE's website. Before running any strat
 
 Initial Plan:
 SMA base → SMA crossover → EMA test → Volume → RSI → MACD → Breakout → ATR risk → Ranking → Portfolio → Walk-forward
+
+Added basic back testing engine and metrics
