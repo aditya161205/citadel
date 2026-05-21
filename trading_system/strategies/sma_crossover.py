@@ -5,11 +5,17 @@ from ..backtester.strategy_base import StrategyBase
 class SMACrossover(StrategyBase):
     """Buy when the short SMA crosses above the long SMA, sell on the cross below."""
 
+    name            = "sma_crossover"
+    interval        = "1d"
+    universe        = "nifty100"
+    initial_capital = 10_000_000.0
+
     def __init__(self, short_window: int = 50, long_window: int = 200):
         if short_window >= long_window:
             raise ValueError("short_window must be less than long_window")
         self.short_window = short_window
         self.long_window = long_window
+        self.warmup = long_window  # need at least long_window bars
 
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
         df = data.copy()
@@ -20,8 +26,7 @@ class SMACrossover(StrategyBase):
         regime = (short_sma > long_sma).astype(int) - (short_sma < long_sma).astype(int)
         regime[short_sma.isna() | long_sma.isna()] = 0
 
-        # Emit a signal only on the bar where the regime flips, so the engine
-        # acts once per crossover instead of every bar.
+        # Emit a signal only on the bar where the regime flips.
         df['signal'] = regime.diff().fillna(0).clip(-1, 1).astype(int)
         df['sma_short'] = short_sma
         df['sma_long'] = long_sma

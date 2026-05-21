@@ -57,3 +57,49 @@ Why ~93/100: the NSE list currently has 104 rows (includes DUMMYVEDL demerger pl
 additions). 11 had no 2018-2024 history on Yahoo — recent IPOs/demergers (TATACAP, HYUNDAI, the Tata
 Motors TMPV/TMCV split, ENRIN, UNITDSPR ticker mismatch) plus the 4 dummies — so they're skipped.
 
+# 21/5
+
+Redesigned the whole system for plug-and-play: write a strategy file, everything else connects
+automatically — backtesting AND paper trading, no wiring needed. Also added a paper-trading pipeline.
+
+Architecture changes:
+- Strategies are now self-describing. `StrategyBase` carries metadata: `name`, `interval` ("1d",
+  "5m", etc.), `warmup` (bars needed), `universe` ("nifty100", an explicit list, or "file:path.csv"),
+  `initial_capital`, `position_size`, and `data_source` (override global default or None).
+- Auto-discovery: `strategies/__init__.py` scans the package for all `StrategyBase` subclasses.
+  Adding a strategy = creating one .py file in `strategies/`. Both the backtester and the paper engine
+  pick it up without any other code change.
+- Pluggable data layer: `marketdata/` package replaces the old `backtester/data_loader.py`.
+  `DataSource` ABC with two implementations: `YahooDataSource` (fully working, daily + intraday) and
+  `CSVDataSource` (documented stub for when we have local CSVs). Global default source in settings,
+  per-strategy override supported. Universe resolution is separate from the data source — both are
+  pluggable independently.
+
+Paper trading pipeline (new):
+- `BrokerBase` abstract interface — swap in Zerodha/Alpaca later without engine changes.
+- `PaperBroker` — simulated fills, JSON-persisted state per strategy at `state/<name>.json` (cash,
+  positions, trades, last-bar timestamp per symbol for idempotency).
+- `order_manager.py` — translates signal + current position into BUY/SELL/no-op.
+- `risk_manager.py` — equal-weight position sizing (mirrors backtest logic).
+- `PaperEngine.run_once()` — one generic cycle: resolve universe, fetch recent data, generate signals,
+  check for new bars (skip already-processed = idempotent), decide + place orders, persist state.
+- Self-scheduling loop (`scheduler.py`): EOD strategies run daily at 15:40 IST; intraday strategies
+  run every `interval` during market hours (09:15-15:30 IST). Weekdays only, holiday list in settings.
+  One failure doesn't kill the loop. Ctrl+C stops cleanly.
+
+Logging: `utils/logger.py` — console + rotating file in `logs/`.
+
+How to run:
+  `py -m trading_system.main_backtest`              — backtest all discovered strategies
+  `py -m trading_system.main_backtest sma_crossover` — backtest just one by name
+  `py -m trading_system.main_live --once`            — paper: single cycle (for testing)
+  `py -m trading_system.main_live`                   — paper: scheduled loop
+
+Backtest results unchanged from 20/5 (229%, same caveats). Paper cycle verified: state file created,
+idempotency confirmed (re-run produces 0 duplicate orders).
+
+Workflow going forward:
+To add a new strategy (e.g. EMA crossover), create trading_system/strategies/ema_crossover.py,
+subclass StrategyBase, set the metadata, implement generate_signals — done. Both backtest and paper
+pick it up. No other files need to change.
+
