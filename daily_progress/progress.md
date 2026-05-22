@@ -103,3 +103,36 @@ To add a new strategy (e.g. EMA crossover), create trading_system/strategies/ema
 subclass StrategyBase, set the metadata, implement generate_signals — done. Both backtest and paper
 pick it up. No other files need to change.
 
+# 22/5
+
+First real test of the plug-and-play promise: added a second strategy and a report tool, both with
+zero wiring beyond their own files.
+
+What was added:
+- `strategies/ema_rsi.py` — second strategy: trend + momentum. Go long only when BOTH agree:
+  fast EMA (20) above slow EMA (50) = uptrend, AND RSI(14) >= 50 = momentum confirms. Exit when
+  either fails. RSI uses Wilder's smoothing (the standard). The EMA pair sets the trend (faster to
+  react than plain SMAs); RSI acts as a filter that weeds out weak EMA crossovers with no momentum
+  behind them.
+- `paper_report.py` — read-only report: loads state/<name>.json, fetches latest prices for held
+  symbols, prints portfolio summary (initial/cash/holdings/P&L), open positions (qty, avg cost,
+  price, unrealized P&L), and the last 20 trades. Runs anytime WITHOUT stopping the live loop, since
+  it only reads the state file.
+  How to run: `py -m trading_system.paper_report` (or `... paper_report sma_crossover` for one).
+
+Why RSI 50 and not the textbook 30/70: those are two opposite uses of RSI. 30/70 is mean-reversion
+(buy oversold, sell overbought = counter-trend). The 50 centerline is momentum confirmation (>50 =
+bulls in control = pro-trend). Since this strategy is trend-following (EMA crossover), 50 reinforces
+the trend; 30/70 would contradict it (enter as momentum collapses) and the two filters would cancel
+out. A 30/70 mean-reversion RSI is a separate strategy for later.
+
+Results (EMA 20/50 + RSI, 2018-01-01 to 2024-01-01, 93 of ~104 stocks with full history):
+  Overall portfolio: Total Return ~168%, Sharpe ~2.13, Max Drawdown ~-8.6%.
+Versus the SMA 50/200 baseline (~229%, Sharpe ~1.65, DD ~-22%): lower headline return but much better
+risk-adjusted — higher Sharpe, drawdown a third of the SMA's. Expected: faster EMAs exit sooner and
+the RSI filter avoids whipsaw entries. Same survivorship-bias caveat as 20/5 applies — treat the
+absolute numbers as inflated; the relative comparison (trend-following vs filtered) is the useful bit.
+
+Plug-and-play confirmed: both files were picked up by the backtester (and the paper engine on next
+restart) with no other code changes — exactly the workflow we set up on 21/5.
+
