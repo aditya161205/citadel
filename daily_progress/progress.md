@@ -136,3 +136,50 @@ absolute numbers as inflated; the relative comparison (trend-following vs filter
 Plug-and-play confirmed: both files were picked up by the backtester (and the paper engine on next
 restart) with no other code changes — exactly the workflow we set up on 21/5.
 
+# 25/5
+
+Reached the MACD + ATR-risk steps of the plan in one strategy: a filtered MACD crossover with
+volatility-based stops. One new file, no other wiring (plug-and-play held again).
+
+What was added:
+- `strategies/macd_trend.py` — third strategy. Standard MACD (12/26 EMAs, 9-EMA signal line, histogram)
+  but a crossover alone doesn't trade. A long fires only when ALL agree: MACD crosses above its signal
+  line, price is above the 200 EMA (long-term uptrend), the histogram is rising (momentum building),
+  ADX(14) >= 20 (trend strong enough to ride), and volume is above its 20-bar average (real
+  participation). Exit fires on the FIRST of: an ATR chandelier stop (sits `atr_mult`=3 ATRs below the
+  best close since entry, ratchets up only — this is both the initial stop loss AND the trailing exit,
+  so risk adapts to volatility instead of a fixed %), or a bearish MACD cross while price is below the
+  200 EMA with the histogram falling.
+
+Indicators: ADX and ATR both use Wilder's smoothing (same convention as the RSI in ema_rsi). Entry
+filters are vectorised; the exit side is a single stateful pass over the bars because the chandelier
+stop is path-dependent (it ratchets off the running peak).
+
+One design note — the engine is long-only (Portfolio.sell only closes a long; there's no shorting).
+So the bearish "sell / short" condition closes the long rather than opening a short, matching how
+sma_crossover and ema_rsi already treat a -1. A true short book would mean changing Portfolio and the
+engine — deferred. decide_order already no-ops a sell-when-flat, so the ATR-stop exits are safe in the
+paper engine too.
+
+How to run: `py -m trading_system.main_backtest macd_trend`.
+
+Results (MACD trend + ATR, 2018-01-01 to 2024-01-01, 93 of ~104 stocks with full history):
+  Overall portfolio: Total Return ~43%, Sharpe ~1.62, Max Drawdown ~-3.98%.
+  1296 trades (~14/stock), 72 of 93 names profitable. Top: ADANIENT ~+971%, TATAPOWER ~+281%,
+  CGPOWER ~+202%. Bottom: UNIONBANK ~-47%, CHOLAFIN ~-34%, BOSCHLTD ~-34%.
+
+Three strategies side by side (same universe/window, same survivorship caveat):
+  SMA 50/200          : ~229%  Sharpe ~1.65  DD ~-22%
+  EMA 20/50 + RSI     : ~168%  Sharpe ~2.13  DD ~-8.6%
+  MACD trend + ATR    : ~43%   Sharpe ~1.62  DD ~-3.98%
+The MACD strategy trades the headline return for capital protection: lowest return of the three but a
+drawdown a fifth of the SMA's. The five-filter entry is deliberately selective (it sits out a lot of
+moves) and the ATR stop cuts losers fast — individual names still draw down 30-50%, but equal-weight
+diversification plus the stops keep the portfolio drawdown under 4%. Sharpe is middle of the pack;
+EMA+RSI is still the best risk-adjusted so far. The same survivorship/look-ahead, no-cost, same-bar
+caveats from 20/5 apply — treat absolute numbers as inflated, the relative comparison is the signal.
+
+Env note: on this macOS Python the data fetch failed with an SSL CERTIFICATE_VERIFY_FAILED until
+SSL_CERT_FILE / REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE were pointed at certifi's bundle (or run the
+"Install Certificates.command" that ships with the python.org installer once).
+
