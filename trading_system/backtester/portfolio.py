@@ -16,15 +16,17 @@ class Portfolio:
             'price': price, 'qty': qty, 'cash': self.cash,
         })
 
-    def sell(self, symbol: str, price: float, date):
-        qty = self.positions.get(symbol, 0)
-        if qty <= 0:
+    def sell(self, symbol: str, price: float, date, qty: int | None = None):
+        """Sell shares. qty=None (default) closes the full position."""
+        held = self.positions.get(symbol, 0)
+        if held <= 0:
             return
-        self.cash += price * qty
-        self.positions[symbol] = 0
+        sell_qty = held if qty is None else min(qty, held)
+        self.cash += price * sell_qty
+        self.positions[symbol] = held - sell_qty
         self.trades.append({
             'date': date, 'symbol': symbol, 'side': 'SELL',
-            'price': price, 'qty': qty, 'cash': self.cash,
+            'price': price, 'qty': sell_qty, 'cash': self.cash,
         })
 
     def portfolio_value(self, prices: dict) -> float:
