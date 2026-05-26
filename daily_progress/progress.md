@@ -225,32 +225,6 @@ to beat on Sharpe.
 | `ema_rsi_vol.py`           | + 10-vol-MA > 30-vol-MA confirmation      | 56%    | 1.91   | -5.3%   | 16        |
 | `ema_rsi_ls.py`            | extend to short side (fast<slow & RSI<50) | 90%    | 1.20   | -13%    | 32        |
 
-### The over-filtering trap (the real lesson)
-Every filter reduced trades. Every filter also reduced Sharpe. Why? Each "smart" filter
-introduces more *out-of-market* time, and in a bull market every hour in cash is opportunity
-cost. Filters reduce noise AND reduce signal — in this setup they removed more signal than
-noise. The baseline ema_rsi is already well-balanced; stacking more conditions on top is mostly
-cash drag in disguise.
-
-A specific note on RSI 50 vs the textbook 30/70: those are *opposite* uses of RSI. 30/70 is
-mean-reversion (counter-trend); 50 is the centerline (pro-trend momentum). Since our strategy
-is trend-following, 50 reinforces the EMA crossover; 30/70 would contradict it. Mixing a trend
-filter with a 30/70 RSI gate would have signals cancel each other out.
-
-A specific note on the long/short experiment: shorts *underperformed* meaningfully. Three
-reasons: (1) Indian equities trend up over 2018-2024, so shorts fight the drift; (2) survivorship
-bias — we use today's Nifty 100 list, which by definition contains stocks that survived every
-drawdown, so we're systematically shorting future winners; (3) trade count nearly doubles, so
-any future transaction cost will hammer this version hardest. (Side note: adding short()/cover()
-to Portfolio in this session means the 25/5 "engine is long-only" comment is now outdated — the
-engine has a state-based path that supports both sides.)
-
-ADX deserves a longer note: at threshold 25 (textbook), it killed returns brutally because ADX
-is a *lagging* confirmation — by the time it crosses 25 we've already missed 30-50% of the
-move. Loosening to 20 helped, but it never beat the baseline. As a *sizer* (continuous scaling
-of position size by ADX), it produced the smallest drawdown of any strategy (-2.4%) but at much
-smaller absolute return — chronically underweight when ADX is moderate. Useful if you wanted
-to run with leverage; not as-is.
 
 ## Part 2 — Mean reversion (Murphy-style) + the 80/20 blend
 
