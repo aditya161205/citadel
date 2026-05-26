@@ -183,3 +183,184 @@ Env note: on this macOS Python the data fetch failed with an SSL CERTIFICATE_VER
 SSL_CERT_FILE / REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE were pointed at certifi's bundle (or run the
 "Install Certificates.command" that ships with the python.org installer once).
 
+# 26/5
+
+Big session — fixed a hidden execution bias in the backtest engine (which retroactively shifted
+every existing strategy's numbers down), ran a thorough filter-tuning study on top of ema_rsi
+(learned the hard way that more filters mostly hurts), then added a genuinely different category
+of strategy — Bollinger-pullback mean-reversion — using Murphy's multi-timeframe doctrine. Closed
+by building a single composite strategy file that runs a real 80/20 trend-+-mean-reversion blend
+in one auto-discovered unit.
+
+## Part 1 — Realism fix + filter experiments on ema_rsi
+
+### Fix: no more same-bar execution
+The 20/5 caveat list flagged this but we hadn't fixed it: signals were generated FROM today's
+close and also executed AT today's close — a small but real form of look-ahead (you can't trade
+at a close that hasn't happened yet). Fixed `backtester/engine.py`: signal at bar T is now acted
+on at bar T+1's Open. Equity is still marked-to-market at each bar's Close (standard convention).
+
+The fix is asymmetric — the faster a strategy trades, the more it was benefiting from the bias.
+*Every previous backtest number on this project is now slightly different*:
+
+| Strategy            | Pre-fix | Post-fix | Delta  | Why                              |
+|--------------------|---------|----------|--------|----------------------------------|
+| sma_crossover       | 229%    | 224%     | -5 pp  | ~1 trade/yr -> negligible bias   |
+| macd_trend          | 43%     | 38.6%    | -4.4 pp| moderate trade rate              |
+| ema_rsi             | 168%    | 144%     | -24 pp | ~18 trades/yr -> large bias      |
+
+The Sharpe ranking didn't change (ema_rsi still tops it post-fix at 2.00), but absolute returns
+deflated by exactly the amount of the lie. This is the diagnostic lesson — strategies that look
+amazing in a naive backtest often deflate the most under realistic execution.
+
+### Filter sweep on ema_rsi — what worked, what didn't
+Tried four variants to either reduce false signals or extend the strategy. The baseline is hard
+to beat on Sharpe.
+
+| Strategy file              | Idea                                      | Return | Sharpe | Max DD  | Trades/yr |
+|---------------------------|-------------------------------------------|--------|--------|---------|-----------|
+| `ema_rsi.py` (baseline)    | trend (EMA) + momentum (RSI > 50)         | 144%   | 2.00 * | -7.1%   | 18        |
+| `ema_rsi_adx.py`           | + ADX > 20 trend-strength filter          | 83%    | 1.72   | -7.1%   | 12        |
+| `ema_rsi_adx_sized.py`     | ADX continuous *sizer* instead of filter  | 21%    | 1.61   | -2.4% * | 14        |
+| `ema_rsi_vol.py`           | + 10-vol-MA > 30-vol-MA confirmation      | 56%    | 1.91   | -5.3%   | 16        |
+| `ema_rsi_ls.py`            | extend to short side (fast<slow & RSI<50) | 90%    | 1.20   | -13%    | 32        |
+
+### The over-filtering trap (the real lesson)
+Every filter reduced trades. Every filter also reduced Sharpe. Why? Each "smart" filter
+introduces more *out-of-market* time, and in a bull market every hour in cash is opportunity
+cost. Filters reduce noise AND reduce signal — in this setup they removed more signal than
+noise. The baseline ema_rsi is already well-balanced; stacking more conditions on top is mostly
+cash drag in disguise.
+
+A specific note on RSI 50 vs the textbook 30/70: those are *opposite* uses of RSI. 30/70 is
+mean-reversion (counter-trend); 50 is the centerline (pro-trend momentum). Since our strategy
+is trend-following, 50 reinforces the EMA crossover; 30/70 would contradict it. Mixing a trend
+filter with a 30/70 RSI gate would have signals cancel each other out.
+
+A specific note on the long/short experiment: shorts *underperformed* meaningfully. Three
+reasons: (1) Indian equities trend up over 2018-2024, so shorts fight the drift; (2) survivorship
+bias — we use today's Nifty 100 list, which by definition contains stocks that survived every
+drawdown, so we're systematically shorting future winners; (3) trade count nearly doubles, so
+any future transaction cost will hammer this version hardest. (Side note: adding short()/cover()
+to Portfolio in this session means the 25/5 "engine is long-only" comment is now outdated — the
+engine has a state-based path that supports both sides.)
+
+ADX deserves a longer note: at threshold 25 (textbook), it killed returns brutally because ADX
+is a *lagging* confirmation — by the time it crosses 25 we've already missed 30-50% of the
+move. Loosening to 20 helped, but it never beat the baseline. As a *sizer* (continuous scaling
+of position size by ADX), it produced the smallest drawdown of any strategy (-2.4%) but at much
+smaller absolute return — chronically underweight when ADX is moderate. Useful if you wanted
+to run with leverage; not as-is.
+
+## Part 2 — Mean reversion (Murphy-style) + the 80/20 blend
+
+After the filter sweep made clear that "more filters on the trend follower" was a dead end, the
+right move was to add a *different category* of strategy: mean reversion. I have a validated
+intraday mean-reversion bot in a separate Intraday-Trading-Bot repo (BB Bounce + RSI Reversal +
+VWAP-EMA Confluence, 63% win rate, walk-forward 70.8% pass). We ported the single
+highest-priority signal (BB Bounce, ~60% of bot's trades) into this framework and bound it to
+the daily trend follower with Murphy's classic doctrine: *"take oscillator signals only in the
+direction of the higher-timeframe trend."*
+
+### Engine extensions for ATR-based exits
+Mean-reversion needs proper stops to work — without tight TPs and wide SLs, the asymmetric
+risk/reward that makes the strategy run is gone. Added a third engine path:
+- `backtester/indicators.py` (NEW): shared helpers `rsi`, `ema`, `atr`, `bollinger` — DRYs up
+  the indicator duplication across strategies.
+- `backtester/strategy_base.py`: optional stop-config metadata fields (`atr_sl_mult`,
+  `atr_tp_mult`, trail params, `min_stop_pct`, `entry_window`, `eod_flatten_time`, `start_date`,
+  `end_date`). Defaults are all `None` -> existing strategies fall through unchanged.
+- `backtester/portfolio.py`: `position_meta` dict + helpers (entry price, ATR, SL/TP, trail
+  state); also added `short()` and `cover()` so the long/short variant could work.
+- `backtester/engine.py`: new `_run_with_stops()` path, activated when a strategy sets
+  `atr_sl_mult`. Per bar: check open positions' SL/TP/trail/EOD-time against bar High/Low first,
+  then enter on signal==1 if inside the entry window. Bar High/Low is the standard backtest
+  convention for stop-fill simulation.
+- `main_backtest.py`: honour `strategy.start_date / end_date` overrides (intraday strategies
+  need ~720d for yfinance's hourly cap).
+
+All additions are opt-in via metadata — existing strategies (sma_crossover, ema_rsi, macd_trend)
+keep their old code paths and old behaviour (except for the same-bar fix).
+
+### The mean-reversion strategies
+- `strategies/bb_pullback.py` (NEW, hourly, 1h interval): the proper Murphy-style mean-reverter.
+  Lazy-fetches daily ema_rsi regime per stock and only takes hourly entries when the daily
+  trend is up. BB lower-band touch + bounce + RSI<50 + EMA50 slope >= -2.5% + Volume > 0.6× avg
+  + bullish candle. ATR-based exits (SL = entry - 3×ATR, TP = entry + 0.4×ATR). Time-stop at
+  15:00 IST, entry window 10:15-14:00. Result over the 2024-06 -> 2026-05 window (the ~720d
+  hourly cap): +1.63% return, Sharpe 1.39, drawdown -0.11%. Per-stock 25 trades/yr, 100/100
+  stocks fired. Small standalone return because it's in cash ~90% of the time (tight TPs, fast
+  in/out), but per-stock drawdowns are 1-3% — mean-reversion working as designed.
+- `strategies/bb_pullback_daily.py` (NEW): daily-bar variant of the same idea, *no* higher-TF
+  gate (the equivalent for a daily strategy would be a weekly filter — separate decision).
+  Built so we could backtest on the same 2018-2024 window as the trend follower.
+  Result: -0.11% return, Sharpe 0.005, drawdown -9.05%. *Doesn't really work* on daily bars —
+  the strategy needs intraday noise to revert from, which a daily timeframe doesn't offer.
+
+### Diversification analysis
+Built `analyze_blend.py` to compute return correlation + blended-portfolio metrics across the
+trend follower and the mean reverter at several weights.
+
+On the proper training window (2018-2024, daily data):
+- Daily-return correlation: +0.296   (mildly correlated; some diversification)
+- Standalone: ema_rsi 144% / Sharpe 2.00 / DD -7.1% ; bb_pullback_daily -0.11% / Sharpe 0.005 / DD -9.1%
+
+Blended portfolio sweep:
+| Mix (trend/MR) | Return  | Sharpe | Max DD  |
+|---------------|---------|--------|---------|
+| 100/0         | 144.06% | 2.001 *| -7.06%  |
+| 90/10         | 129.64% | 1.983  | -6.71%  |
+| 80/20         | 115.22% | 1.959  | -6.33%  |
+| 70/30         | 100.81% | 1.927  | -5.91% *|
+| 50/50         |  71.97% | 1.823  | -6.63%  |
+| 30/70         |  43.14% | 1.585  | -7.54%  |
+| 0/100         |  -0.11% | 0.005  | -9.05%  |
+
+Findings:
+1. Pure ema_rsi still wins on Sharpe — every blend dilutes it because the daily MR is too
+   close to zero return.
+2. Drawdown bottoms out at 70/30 (-5.91% vs the pure trend's -7.06%) — about 15-20% less pain
+   for a 30% MR allocation.
+3. 80/20 is the most defensible practical compromise: ~80% of the return with ~10% less
+   drawdown. Defensible if smoothness matters as much as return; pure ema_rsi defensible if
+   only the Sharpe number matters.
+
+The deeper finding: mean-reversion *genuinely needs a higher-frequency timeframe* to work. The
+hourly version makes conceptual sense; the daily version doesn't. We can't backtest the hourly
+version on 2018-2024 due to yfinance's 730-day hourly cap. Future remediation options: save
+hourly data ourselves going forward, or switch to a paid feed.
+
+### The blend strategy (single file)
+`strategies/blend_trend_mr.py` (NEW): a true composite strategy. Declares `is_composite = True`.
+`main_backtest.py` detects this and routes to `run_blend()` instead of the standard per-stock
+loop. `run_blend()` finds `ema_rsi` and `bb_pullback_daily` via the existing auto-discovery
+registry, runs each with its proportional capital (80 lakh + 20 lakh), and sums their equity
+curves into one portfolio equity series.
+
+Result: 115.15% / Sharpe 1.961 / DD -6.31% — matches the analytical blend within rounding
+(physical-split vs normalised-blend math). Single file, auto-discovered, runnable as
+`py -m trading_system.main_backtest blend_trend_mr`. To try a different mix, edit the
+`ALLOCATIONS` dict at the top of the file.
+
+## Final scoreboard
+
+All strategies, training window 2018-2024 (or the hourly window noted), after the same-bar
+execution fix:
+
+| Strategy            | Window      | Return  | Sharpe | Max DD  | Notes                              |
+|--------------------|-------------|---------|--------|---------|------------------------------------|
+| sma_crossover       | 2018-2024   | 224%    | 1.64   | -22%    | slow baseline                      |
+| ema_rsi             | 2018-2024   | 144%    | 2.00   | -7.1%   | the keeper                         |
+| ema_rsi_adx         | 2018-2024   | 83%     | 1.72   | -7.1%   | over-filtered                      |
+| ema_rsi_adx_sized   | 2018-2024   | 21%     | 1.61   | -2.4%   | tiny but smoothest                 |
+| ema_rsi_vol         | 2018-2024   | 56%     | 1.91   | -5.3%   | over-filtered (different angle)    |
+| ema_rsi_ls          | 2018-2024   | 90%     | 1.20   | -13%    | shorts hurt in bull market         |
+| macd_trend          | 2018-2024   | 39%     | 1.48   | -4.2%   | post same-bar fix                  |
+| bb_pullback_daily   | 2018-2024   | -0.1%   | 0.005  | -9.1%   | wrong timeframe for MR             |
+| bb_pullback (hourly)| 2024-06+    | 1.6%    | 1.39   | -0.1%   | works as MR — small but smooth     |
+| **blend_trend_mr**  | 2018-2024   | 115%    | 1.96   | -6.3%   | **80/20 trend+MR composite**       |
+
+Known realism debt still outstanding (unchanged from 20/5 list, except same-bar execution is
+now fixed): survivorship bias (today's Nifty 100 applied to 2018), no transaction costs, no
+idle-cash redeployment between sub-strategies.
+

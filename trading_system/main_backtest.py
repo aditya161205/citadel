@@ -20,8 +20,10 @@ def run_strategy(strategy):
     print(f"Universe: {len(symbols)} symbols.")
 
     source = get_data_source(strategy.data_source)
-    data = source.get_history(symbols, start=settings.START_DATE,
-                              end=settings.END_DATE, interval=strategy.interval)
+    start = strategy.start_date or settings.START_DATE
+    end   = strategy.end_date   or settings.END_DATE
+    data = source.get_history(symbols, start=start, end=end,
+                              interval=strategy.interval)
     if not data:
         print(f"  No data for [{strategy.name}] -- skipping.")
         return
@@ -86,6 +88,20 @@ def _print_portfolio_report(portfolio_equity, n_stocks, strategy):
     print("=" * 60 + "\n")
 
 
+def run_composite(strategy):
+    """Composite strategies orchestrate multiple sub-strategies and produce a
+    single blended equity curve. Routed here when is_composite=True."""
+    print(f"\n{'='*60}")
+    print(f"  Backtesting [{strategy.name}]  (composite blend)")
+    print(f"{'='*60}")
+    combined, per_strategy = strategy.run_blend()
+    metrics = compute_metrics(combined, strategy.initial_capital)
+    print(f"\n===== OVERALL PORTFOLIO [{strategy.name}] (blend) =====")
+    for k, v in metrics.items():
+        print(f"  {k:<25}: {v}")
+    print("=" * 60 + "\n")
+
+
 def main():
     # Accept an optional strategy name filter: py -m trading_system.main_backtest sma_crossover
     name_filter = sys.argv[1] if len(sys.argv) > 1 else None
@@ -99,7 +115,10 @@ def main():
         strat = cls()
         if name_filter and strat.name != name_filter:
             continue
-        run_strategy(strat)
+        if getattr(strat, 'is_composite', False):
+            run_composite(strat)
+        else:
+            run_strategy(strat)
 
 
 if __name__ == "__main__":
