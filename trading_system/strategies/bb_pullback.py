@@ -5,6 +5,8 @@ entries only in the direction of the higher-timeframe trend. Ported from
 the user's Intraday-Trading-Bot (BB Bounce signal, ~60% of its trades).
 """
 
+from datetime import date
+
 import pandas as pd
 
 from ..backtester.strategy_base import StrategyBase
@@ -36,6 +38,9 @@ class BBPullback(StrategyBase):
     universe        = "nifty100"
     initial_capital = 10_000_000.0
     warmup          = 200             # hourly bars (~30 trading days)
+    # Mean-reverter -- already has its own higher-TF (daily ema_rsi) gate.
+    # The market-wide regime filter would double-gate it. Opt out.
+    respect_regime_filter = False
 
     # yfinance caps hourly history at ~730 days. Pick a window that fits.
     start_date = "2024-06-01"
@@ -83,9 +88,12 @@ class BBPullback(StrategyBase):
         symbols = resolve_universe(self.universe)
         source  = get_data_source(self.data_source)
         # Pull enough daily history that the slow EMA is settled at the start
-        # of our hourly window. Three years comfortably covers that.
+        # of our hourly window. Three years comfortably covers that. For the
+        # end date we use the later of self.end_date and today, so the cache
+        # still works in live / walk-forward mode where today > end_date.
         daily_start = "2022-01-01"
-        daily_end   = self.end_date
+        today_str   = date.today().isoformat()
+        daily_end   = max(self.end_date or today_str, today_str)
         daily = source.get_history(symbols, start=daily_start,
                                    end=daily_end, interval="1d")
 

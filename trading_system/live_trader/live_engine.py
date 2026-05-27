@@ -13,6 +13,14 @@ def run_once(strategy, broker: PaperBroker):
     with a new bar and a non-zero signal.  Safe to call repeatedly -- the
     last-bar guard prevents acting on the same bar twice.
     """
+    # Composite strategies don't have a per-symbol signal stream -- they're
+    # portfolios of sub-strategies. The walk-forward simulator handles them
+    # via run_blend(); the live loop just skips them so it doesn't crash.
+    if getattr(strategy, "is_composite", False):
+        log.info("[%s] composite strategy -- skipped in live loop (use walk-forward).",
+                 strategy.name)
+        return
+
     symbols = resolve_universe(strategy.universe)
     source = get_data_source(strategy.data_source)
     data = source.get_recent(symbols, interval=strategy.interval, warmup=strategy.warmup)
@@ -25,13 +33,19 @@ def run_once(strategy, broker: PaperBroker):
     capital_per_symbol = strategy.initial_capital / n_universe
     positions = broker.get_positions()
     orders_placed = 0
+    last_close_prices: dict[str, float] = {}
+    cycle_ts = None
 
     for sym, df in data.items():
+        # Stash the symbol BEFORE generate_signals so multi-resolution
+        # strategies (e.g. bb_pullback) can look it up inside the call.
+        df.attrs['symbol'] = sym
         sig_df = strategy.generate_signals(df)
         if sig_df.empty:
             continue
 
         last_ts = str(sig_df.index[-1])
+        cycle_ts = last_ts
 
         # Idempotency: skip if we already acted on this bar.
         if broker.last_bar(sym) and last_ts <= broker.last_bar(sym):
@@ -39,6 +53,7 @@ def run_once(strategy, broker: PaperBroker):
 
         signal = int(sig_df['signal'].iloc[-1])
         price = float(sig_df['Close'].iloc[-1])
+        last_close_prices[sym] = price
 
         order = decide_order(
             signal=signal,
@@ -50,14 +65,26 @@ def run_once(strategy, broker: PaperBroker):
             capital_per_symbol=capital_per_symbol,
         )
 
+        action = "noop"
         if order:
-            receipt = broker.place_order(sym, order["side"], order["qty"], price, last_ts)
+            broker.place_order(sym, order["side"], order["qty"], price, last_ts)
+            action = order["side"]
             log.info("[%s] %s %d × %s @ %.2f", strategy.name,
                      order["side"], order["qty"], sym, price)
             positions = broker.get_positions()  # refresh after trade
             orders_placed += 1
 
+        # Always record the signal so we can see what fired even when no trade
+        # was placed (e.g. signal=1 but already in position).
+        if signal != 0 or action != "noop":
+            broker.log_signal(last_ts, sym, signal, price, action)
+
         broker.set_last_bar(sym, last_ts)
+
+    # Mark portfolio value with the latest prices we saw this cycle so the
+    # equity history grows by one point per cycle.
+    if cycle_ts and last_close_prices:
+        broker.mark_equity(cycle_ts, last_close_prices)
 
     broker.save()
     log.info("[%s] Cycle done -- %d orders, cash=%.2f, positions=%d symbols.",

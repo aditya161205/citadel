@@ -35,7 +35,41 @@ class StrategyBase(ABC):
     entry_window:     tuple[str, str] | None = None  # e.g. ("10:15", "14:00")
     eod_flatten_time: str | None             = None  # e.g. "15:00"
 
-    @abstractmethod
+    # -- portfolio-level regime filter --
+    # When True (the default) the paper-walkforward / live simulator blocks
+    # NEW long entries when the Nifty 50 regime filter is off (chop or down
+    # market). Mean-reversion strategies should set this False on the class
+    # because chop is where they make money.
+    respect_regime_filter: bool = True
+
+    # -- portfolio strategy flag --
+    # Set True on cross-sectional strategies that operate on the whole
+    # universe at once (e.g. momentum: rank all stocks, hold top N).
+    # The walk-forward simulator routes these through generate_target_portfolio
+    # instead of per-symbol generate_signals.
+    is_portfolio_strategy: bool = False
+
+    # Rebalance frequency for portfolio strategies. "1D" = every bar,
+    # "1M" = first trading day of each month, "1W" = first of each week.
+    rebalance_freq: str = "1M"
+
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Return data with an added integer 'signal' column: 1=buy, -1=sell, 0=hold."""
-        ...
+        """Return data with an added integer 'signal' column: 1=buy, -1=sell, 0=hold.
+
+        Portfolio strategies override generate_target_portfolio instead.
+        """
+        if self.is_portfolio_strategy:
+            raise NotImplementedError(
+                f"{type(self).__name__} is a portfolio strategy — "
+                "implement generate_target_portfolio(data_dict, ts) instead.")
+        raise NotImplementedError
+
+    def generate_target_portfolio(self, data: dict, ts) -> dict[str, float]:
+        """Portfolio strategies override this. Return {symbol: weight in [0,1]}.
+
+        Weights need not sum to 1.0 (1 - sum(weights) stays in cash).
+        Symbols not in the returned dict are exited (target weight 0).
+        `data` is {symbol: DataFrame}, all sliced to <= ts when called.
+        """
+        raise NotImplementedError(
+            "Portfolio strategies must implement generate_target_portfolio.")

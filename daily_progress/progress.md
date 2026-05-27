@@ -338,3 +338,196 @@ Known realism debt still outstanding (unchanged from 20/5 list, except same-bar 
 now fixed): survivorship bias (today's Nifty 100 applied to 2018), no transaction costs, no
 idle-cash redeployment between sub-strategies.
 
+# 27/5
+
+The biggest session so far. Started from "paper trading exists but has never
+actually measured anything", ended with a full walk-forward simulator, two
+new strategies, a benchmark, a regime filter, and honest post-cost numbers
+that survive a real audit. Also confirmed (and then deleted) ema_rsi_ls as
+genuinely broken.
+
+## Part 1 — Built the walk-forward measurement infrastructure
+
+The paper-trading pipeline from 21/5 was just a `--once` smoke test. It
+never ran continuously, never compared against a benchmark, and the only
+"results" anywhere were from the 2018-2024 backtest. We built a real
+out-of-sample evaluation framework:
+
+- `paper_walkforward.py` (NEW): replays the paper-trading engine bar-by-bar
+  over the 2024-01-01 -> today window the strategies never saw. Same
+  PaperBroker the live loop uses, same idempotency, state persisted in
+  `state/<name>_paper.json`. Handles four strategy types: transition-signal,
+  state-based (long/short), ATR-stop, and portfolio-level.
+- `benchmark.py` (NEW): Nifty 50 buy-and-hold equity curve, written as a
+  strategy-shaped state file so the report renders it alongside everything else.
+- `regime_filter.py` (NEW): Nifty 50 200-day SMA + 20-day annualized
+  realized vol < 18%. When the regime is "off", trend-style strategies skip
+  new entries (mean-reverters opt out with `respect_regime_filter = False`).
+- Rolling walk-forward (`--rolling N`): splits the OOS window into N-month
+  slices, runs each as a fresh broker. Reports median Sharpe, % positive
+  slices, and a per-slice returns matrix. The robustness check the project
+  was missing.
+- `PaperBroker` extended with `equity_history`, `signal_log`, daily RFR
+  accrual, and turnover tracking. State files now persist all four.
+- `paper_report.py` rewritten to show equity history + signals + last 20
+  trades; `performance_report.py` (NEW) prints a single side-by-side table.
+
+## Part 2 — Bias and bug fixes (the honest-numbers pass)
+
+After the first walk-forward run produced suspiciously good results, did a
+full audit and found four real issues that were inflating returns:
+
+- **Portfolio look-ahead bias**: `_run_portfolio_walkforward` was computing
+  target weights from data through `ts` AND executing fills at `ts`'s
+  close — impossible in real trading. Fixed: decide with `prev_ts`'s data,
+  fill at `ts`'s open. Shaved ~13 percentage points off `xsec_momentum`.
+- **Regime filter look-ahead**: the regime gate was queried at the
+  execution bar (T+1) rather than the signal bar (T). T+1's 200-SMA uses
+  T+1's close, which the strategy wouldn't have at T's close when the
+  signal fired. Fixed across all three step functions.
+- **Sharpe ignored the risk-free rate**: with cash earning 6% RFR via
+  `accrue_interest`, the old `mean / std * sqrt(252)` was double-counting
+  RFR (added as return, never subtracted as baseline). Several "Sharpe > 3"
+  numbers were math artefacts of mostly-in-cash strategies with near-zero
+  volatility. Replaced with the textbook excess-return Sharpe; added
+  Sortino, Calmar, CAGR, and annualized vol.
+- **No transaction costs**: added 10 bps per side (20 bps RT) in
+  `Portfolio.buy/sell/short/cover`, charged out of cash. Realistic for
+  Indian retail delivery (brokerage + STT + stamp + GST + slippage).
+
+Also confirmed `ema_rsi_ls` as a dead end (rolling test: 20% positive
+slices, mean per-slice return -0.12%, S1 carried the entire headline) and
+deleted it.
+
+## Part 3 — Two new strategies + a new composite
+
+The existing 9 strategies were all time-series ("does THIS stock look good
+in isolation?"). The missing piece was a cross-sectional factor and a
+genuine beta-with-kill-switch sleeve:
+
+- `strategies/cross_sectional_momentum.py` (NEW): ranks Nifty 100 by trailing
+  6-month return (skip last month), holds top 20 inverse-vol weighted,
+  rebalances monthly. The academic momentum factor. Stays ~100% invested,
+  built on a new portfolio-strategy execution path (`is_portfolio_strategy`,
+  `generate_target_portfolio`).
+- `strategies/nifty_trend_follow.py` (NEW): holds NIFTYBEES.NS at 100% when
+  the regime is on, full cash when off. Pure beta with a downside switch.
+- `strategies/smart_blend.py` (NEW composite): 50% xsec_momentum + 30%
+  sma_crossover + 20% nifty_trend_follow. Diversifies factor + trend + beta;
+  the diversification dividend cuts max drawdown by ~40% vs xsec alone.
+
+`StrategyBase` was extended with `is_portfolio_strategy`,
+`generate_target_portfolio`, `respect_regime_filter`. Existing strategies
+were untouched except for opt-out flags on the mean-reverters.
+
+## Summary of fixes (in bullet points)
+
+- Fixed live engine crash on composite strategies (skip if `is_composite`).
+- Fixed `bb_pullback` hardcoded `end_date` so it works in live mode.
+- Fixed `df.attrs['symbol']` ordering bug in the live engine that silently
+  broke `bb_pullback`'s daily-regime lookup.
+- Upgraded yfinance 0.2.38 -> 1.4.0 (the old one returned empty data for
+  every `.NS` ticker after Yahoo's API change — *nothing* was actually
+  fetching data before this).
+- Added explicit train (2018-01-01 -> 2024-01-01) and paper-trading
+  (2024-01-01 -> today) windows in `settings.py`.
+- Built bar-by-bar walk-forward simulator that replays paper trading on
+  the unseen 2024-2026 data.
+- Added rolling-slice mode (`--rolling 6`) for robustness across regimes.
+- Added Nifty 50 buy-and-hold benchmark.
+- Added 200-SMA + realized-vol regime filter gate.
+- Cash earns 6% risk-free rate (Indian liquid-fund proxy), daily compounded.
+- Added 10 bps/side transaction costs across all paths
+  (`Portfolio.buy/sell/short/cover`).
+- Fixed Sharpe to actually subtract RFR; added Sortino, Calmar, CAGR,
+  annualized vol.
+- Added turnover tracking (cumulative notional + annualized turnover %).
+- Fixed portfolio look-ahead (decide at T-1, fill at T's open).
+- Fixed regime look-ahead (query at signal bar, not execution bar).
+- New strategies: cross_sectional_momentum, nifty_trend_follow, smart_blend.
+- Built `performance_report.py` — one table, every strategy, every metric.
+- Removed `ema_rsi_ls` (confirmed broken across rolling slices).
+
+## Every strategy in one line
+
+| Strategy | What it does |
+|----------|--------------|
+| `sma_crossover` | Long when 50-SMA > 200-SMA. Slow, original baseline. |
+| `ema_rsi` | Long when EMA(20) > EMA(50) AND RSI(14) >= 50. Trend + momentum. |
+| `ema_rsi_adx` | `ema_rsi` plus ADX(14) >= 20 (trend-strength filter). |
+| `ema_rsi_adx_sized` | `ema_rsi` entries, position size scales linearly with ADX. |
+| `ema_rsi_vol` | `ema_rsi` plus a volume-MA confirmation. |
+| `macd_trend` | Filtered MACD + ATR chandelier stop. Very selective entries. |
+| `bb_pullback` (1h) | Hourly BB-lower bounce, gated by daily ema_rsi regime. |
+| `bb_pullback_daily` | Same idea on daily bars, no higher-TF gate. |
+| `blend_trend_mr` | Original composite: 80% ema_rsi + 20% bb_pullback_daily. |
+| `xsec_momentum` *(NEW)* | Top-20 by 6m-return, inverse-vol weighted, monthly rebalance. |
+| `nifty_trend_follow` *(NEW)* | NIFTYBEES.NS when regime ON, cash when OFF. |
+| `smart_blend` *(NEW composite)* | 50% xsec_momentum + 30% sma_crossover + 20% nifty_trend_follow. |
+
+## Final performance report (2024-01-01 -> 2026-05-26)
+
+All numbers post-cost (20 bps RT), post-RFR (6% subtracted in Sharpe),
+walk-forward OOS with regime filter on.
+
+| Strategy            | Ret%  | CAGR% | Sharpe | Sortino | Calmar  | Vol%  | MaxDD%  | Trades | Turn%/y | Fees% | Alpha vs Nifty% |
+|---------------------|-------|-------|--------|---------|---------|-------|---------|--------|---------|-------|-----------------|
+| **xsec_momentum**   | 32.63 | 12.49 | 0.459  | 0.589   | 0.93    | 16.50 | -13.37  | 393    | 810     | 1.94  | **+22.64**      |
+| bb_pullback         | 13.05 |  6.43 | 0.370  | 0.523   | 23.09   |  0.35 |  -0.28  | 70     | 483     | 0.95  |  0.00           |
+| **smart_blend**     | 22.44 |  8.81 | 0.321  | 0.411   | 1.03    | 10.33 |  -8.57  | 541    | 524     | 1.26  | **+12.45**      |
+| sma_crossover       | 15.56 |  6.22 | 0.129  | 0.168   | 2.09    |  2.79 |  -2.98  | 133    |  51     | 0.12  |  +5.57          |
+| ema_rsi_vol         | 13.83 |  5.55 | -0.062 | -0.071  | 1.25    |  3.93 |  -4.44  | 2648   | 1035    | 2.48  |  +3.84          |
+| bb_pullback_daily   | 13.97 |  5.60 | -0.134 | -0.185  | 2.54    |  1.88 |  -2.21  | 2646   | 1035    | 2.48  |  +3.98          |
+| macd_trend          | 13.38 |  5.38 | -0.159 | -0.191  | 2.12    |  2.83 |  -2.54  | 491    | 192     | 0.46  |  +3.39          |
+| ema_rsi_adx_sized   | 14.13 |  5.67 | -0.175 | -0.213  | 7.29    |  1.16 |  -0.78  | 2052   | 227     | 0.54  |  +4.14          |
+| ema_rsi_adx         | 12.10 |  4.88 | -0.210 | -0.241  | 1.08    |  4.22 |  -4.52  | 1834   | 716     | 1.72  |  +2.11          |
+| nifty_trend_follow  |  7.45 |  3.04 | -0.273 | -0.374  | 0.24    |  8.74 | -12.92  | 17     | 522     | 1.25  |  -2.54          |
+| ema_rsi             |  8.64 |  3.52 | -0.354 | -0.408  | 0.56    |  6.01 |  -6.27  | 3102   | 1212    | 2.91  |  -1.35          |
+| blend_trend_mr      |  9.75 |  3.96 | -0.355 | -0.411  | 0.78    |  4.93 |  -5.07  | 5695   | 1161    | 2.78  |  -0.24          |
+| **Nifty 50 (BMK)**  |  9.99 |  4.05 | -0.058 | -0.080  | 0.26    | 13.85 | -15.77  | 1      |   0     | 0.00  |  0.00 (baseline)|
+
+Takeaways:
+- Only **xsec_momentum, bb_pullback, smart_blend, sma_crossover** have
+  positive *real* Sharpe (beat RFR after costs). The earlier "Sharpe 6.88"
+  numbers were math artefacts of 95%-cash strategies — they collapse to
+  realistic values now.
+- The benchmark itself has negative Sharpe in this window (Nifty grew
+  slower than the 6% RFR over 2024-2026). That recontextualizes everything.
+- Alpha column is the real "vs buy-and-hold" number: **xsec_momentum +22.6
+  pp**, **smart_blend +12.5 pp** — both genuine outperformers after fees.
+- `xsec_momentum`'s 32.6% is partly carried by a single +36% slice in
+  early 2024 (per-slice returns 36.4, 1.5, 2.9, 3.2, -1.8). The headline
+  is real but regime-dependent. Documented in the rolling section.
+
+## How to run
+
+```
+py -m trading_system.benchmark                                  # update benchmark
+py -m trading_system.paper_walkforward --regime --reset         # full walk-forward
+py -m trading_system.paper_walkforward --rolling 6 --regime     # rolling slices
+py -m trading_system.performance_report --sort sharpe           # comparison table
+py -m trading_system.performance_report --csv results/perf.csv  # save CSV
+py -m trading_system.paper_report --signals 50                  # last 50 signals
+```
+
+State files live in `state/<name>_paper_regime.json`. Composite blends
+also write `_paper_regime_combined.json`.
+
+## Realism debt still outstanding
+
+- **Survivorship bias** in the universe: still using today's Nifty 100
+  applied to 2024-01-01. Smaller effect than the 2018-2024 window but
+  non-zero for xsec_momentum specifically (stocks added to Nifty 100 in
+  mid-2025 are included in 2024 momentum ranking because they ripped).
+  Hard to fix without historical constituent data.
+- **smart_blend weights are mildly snooped**: 50/30/20 was chosen after
+  seeing xsec_momentum's headline. A rigorous walk-forward would optimise
+  weights on training slices and apply them to a held-out test.
+- **No slippage model** beyond what's bundled into the 10 bps cost.
+  Probably under-estimates cost for `bb_pullback` (hourly, fast in/out).
+- **Live paper trading never actually run continuously**: the walk-forward
+  simulates what would have happened. The actual scheduler exists and
+  works, but only as a `--once` smoke test. Starting it forward from
+  today would give real-time validation against the simulator's
+  predictions.
+

@@ -27,6 +27,8 @@ class BBPullbackDaily(StrategyBase):
     universe        = "nifty100"
     initial_capital = 10_000_000.0
     warmup          = 100
+    # Mean-reverter: chop is where it works. Skip the trend-style regime gate.
+    respect_regime_filter = False
 
     # Use the project-wide defaults (2018-01-01 -> 2024-01-01) by leaving
     # start_date / end_date unset (None falls back to settings).
